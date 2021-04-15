@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+BKPS_DONE=""
+DEFAULT_BKPS="multiprova-mongo-producao multiprova-agenda-db"
+TIMESTAMP=$(date '+%y%m%d')
+UPLOADED=false
+
+echo "# Rotina iniciada em: `date +%Y-%m-%d_%H:%M:%S`"
+
+cd ${WORKDIR:- /data/backups}
+rm -f ${ERRORLOG:- /data/backups/error.log}
+
+for dump in ${BACKUP_PLAN:- $DEFAULT_BKPS}
+do
+    echo -e "\n==> Realizando Dump de $dump"
+    RESPONSE=$(curl -s -XPOST http://bkp-bd:8090/backup/$dump 2>> ${ERRORLOG:- /data/backups/error.log})
+    NOME_BKP=$(echo $RESPONSE | jq -r .file | cut -d. -f1)
+    TAR_NAME="$dump-$TIMESTAMP.tgz"
+    tar -cvzf $TAR_NAME $dump/$NOME_BKP.{gz,log} 2>> ${ERRORLOG:- /data/backups/error.log}
+    if [ $? -eq 0 ]; then
+        echo "OK! $TAR_NAME"
+        BKPS_DONE+="$TAR_NAME "
+    else
+        echo "Falhou! $TAR_NAME"
+    fi
+done
+
+echo -e "\n==> Compactando bkps de bancos"
+echo "Realizando a compactacao dos seguintes backups: $BKPS_DONE"
+tar -cvzf multiprova-db-$TIMESTAMP.tar.gz $BKPS_DONE 2>> ${ERRORLOG:- /data/backups/error.log}
+if [ $? -eq 0 ]; then
+    echo "OK! multiprova-db-$TIMESTAMP.tar.gz"
+else
+    echo "Falhou! multiprova-db-$TIMESTAMP.tar.gz"
+fi
+
+echo -e "\n==> Enviando bkp para AWS S3"
+aws s3 cp /data/backups/multiprova-db-$TIMESTAMP.tar.gz s3://multiprova-bucket/backups/$TIMESTAMP/multiprova-db-$TIMESTAMP.tar.gz 2>> ${ERRORLOG:- /data/backups/error.log}
+
+if [ $? -eq 0 ]; then
+    echo "Upload do banco foi bem sucedido!"
+else
+    echo "Upload do banco nao foi bem sucedido!"
+fi
+
+echo -e "\n==> Fazendo bkp do conteudo estatico"
+rsync -av --delete /data/nfs/multiprova-api/ /data/backups/multiprova-api/ 2>> ${ERRORLOG:- /data/backups/error.log}
+tar -czf multiprova-static-$TIMESTAMP.tar.gz ${NFS_PATH:- /data/nfs}/multiprova-api 2>> ${ERRORLOG:- /data/backups/error.log} 
+if [ $? -eq 0 ]; then
+    echo "OK! multiprova-static-$TIMESTAMP.tar.gz"
+else
+    echo "Falhou! multiprova-static-$TIMESTAMP.tar.gz"
+fi
+
+echo -e "\n==> Enviando conteúdo estático para AWS S3"
+aws s3 cp /data/backups/multiprova-static-$TIMESTAMP.tar.gz s3://multiprova-bucket/backups/$TIMESTAMP/multiprova-static-$TIMESTAMP.tar.gz 2>> ${ERRORLOG:- /data/backups/error.log}
+
+if [ $? -eq 0 ]; then
+    echo "OK upload do conteúdo static foi bem sucedido!"
+    UPLOADED=true
+else
+    echo "Upload do conteúdo static nao foi bem sucedido!"
+fi
+
+if [[ $UPLOADED == true ]]; then
+rm -rf `find /data/backups -iname "*.gz*"`
+rm -rf `find /data/backups -iname "*.tgz*"`
+
+fi
+
+if [ $? -eq 0 ]; then
+    echo "OK! Cópia local apagada"	
+fi
